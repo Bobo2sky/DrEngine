@@ -1,0 +1,76 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Cell Size: 5
+      Plane Cell Count: 40
+      Color: 160; 160; 164
+      Reference Frame: <Fixed Frame>
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Show Names: true
+      Show Axes: true
+      Marker Scale: 1.5
+      Frame Timeout: 15
+    - Class: rviz_default_plugins/Path
+      Enabled: true
+      Name: DR轨迹 (/dr_path)
+      Topic:
+        Value: /dr_path
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Color: 0; 200; 255
+      Line Style: Lines
+      Line Width: 0.06
+      Alpha: 1
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: DR里程计 (/dr_odom)
+      Topic:
+        Value: /dr_odom
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Keep: 1
+      Shape:
+        Alpha: 1
+        Axes Length: 1.2
+        Axes Radius: 0.12
+        Color: 255; 120; 0
+        Head Length: 0.3
+        Length: 1.2
+        Shaft Length: 0.8
+        Shaft Radius: 0.08
+        Value: Axes
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: odom
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 60
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Current View
+      Pitch: 0.9
+      Target Frame: <Fixed Frame>
+      Yaw: 0.6
+    Saved: ~
+Window Geometry:
+  Height: 900
+  Width: 1400

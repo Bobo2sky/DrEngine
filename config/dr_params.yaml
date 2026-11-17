@@ -1,0 +1,62 @@
+# ============================================================================
+#  DrEngine 参数（ros2 param 文件格式，用 --params-file 加载）
+#  算法口径见 include/dr_engine/dr_engine.h：姿态=AHRS，速度大小=底盘车速，位置=∫v·dt
+# ============================================================================
+dr_engine_node:
+  ros__parameters:
+    use_sim_time: false            # 时钟源（唯一出口，run.sh 不再传）：
+                                   #   实车 = false（用系统时钟）
+                                   #   回放 = true（配合 ros2 bag play --clock；本节点 TF 的 stamp 取 IMU 报文头，
+                                   #          所以回放时设 false 也能跑，只是节点内部 ROS 时间走墙钟）
+
+    # ---- 话题与坐标系 ----
+    imu_topic: "/m22/imu/data_raw"
+    speed_topic: "/chassis_info"
+    odom_topic: "/dr_odom"
+    path_topic: "/dr_path"
+    parent_frame: "odom"          # DR 原点系（不发布 /tf_static ⇒ rviz Fixed Frame 用它）
+    child_frame: "base_link"
+
+    # ---- 发布 ----
+    publish_rate_hz: 50.0         # /tf、/dr_odom、/total_mileage 发布率
+    path_publish_hz: 1.0          # /dr_path 发布率（整条轨迹数组，独立节流；勿跟高频绑定）
+    path_append_hz: 1.0           # 轨迹点采样率（方案C：10→1，与下面上限共同把单条消息压在 ~1.6MB 内）
+    path_max_poses: 20000         # 轨迹点上限（方案C：200000→20000）⇒ 超额时从头部滚动删除（滚动窗口）；0 = 不限制
+    log_period_s: 1.0
+    log_file: ""                  # 日志文件: 空 = <工程根>/log/dr.text（自动创建目录，追加写）
+    qos_reliable: false           # 实车传感器一般 best_effort
+    qos_depth: 50
+
+    # ---- 静止初始化 ----
+    init_static_s: 2.0            # 静止窗口长度（估陀螺零偏 + 初始 roll/pitch）
+    init_min_samples: 50
+    g: 9.80665
+    g_auto: true                  # true ⇒ 用静止实测 |a| 覆盖 g（贴合本传感器标度）
+    yaw0_deg: 0.0                 # 纯 DR 无绝对航向，给一个初始基准
+
+    # ---- AHRS（Madgwick，6 轴）----
+    ahrs_gain: 0.5
+    ahrs_acc_reject_deg: 10.0     # 越大越依赖陀螺、越不信加速度计
+    ahrs_reject_timeout_s: 5.0
+    use_ahrs_offset: true         # 陀螺零偏在线跟随
+
+    # ---- 车速 ----
+    speed_scale: 1.0              # 车速标度修正（车轮半径误差等）
+    gear_reverse_fix: true        # ★chassis speed_mps 是【幅值】：倒挡取负（口径同 hg-slam）
+    reverse_gear_value: 3         # 倒挡编码（common_msgs/msg/Enum: GEAR_N=1, GEAR_D=2, GEAR_R=3, GEAR_P=4）
+    speed_timeout_s: 0.3          # 超时门限
+    hold_last_speed: true         # true=保持上次速度；false=置零
+    use_abs_speed: false          # true=只用 |speed|（倒车也当作前进）
+
+    # ---- 位置解算模式 ----
+    z_mode: "planar"              # "planar"(2D) = z 恒 0，不积分（地面车辆推荐，避免 pitch 偏差积成米级高程漂）
+                                  # "3d"          = z 由 pitch 积分 z=∫v·sin(pitch)dt（坡道/地下坡可用）
+    # ---- 总里程 ----
+    mileage_topic: "/total_mileage"   # geometry_msgs/PointStamped
+    mileage_field: "x"                 # 里程写进哪个字段: x / y / z
+
+    # ---- 健壮性 ----
+    max_gap_s: 0.2                # IMU 间隔超此值视为断流：不积分，只重同步
+    imu_timeout_s: 0.3            # IMU 超时门限（与 speed_timeout_s 配对使用）
+    pause_on_both_timeout: true   # IMU 与车速【同时】超时 ⇒ 停止递推、TF 位置输出 (0,0,0)；
+                                  #   数据恢复后从原点重新累计（姿态/零偏/总里程保留）
