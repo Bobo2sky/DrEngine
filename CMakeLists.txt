@@ -3,7 +3,7 @@ project(dr_engine CXX)
 
 # ============================================================================
 #  DrEngine —— 纯 DR 工程（x86 直编 / aarch64(J6) 交叉编译通用）
-#  输入: /m22/imu/data_raw + /gnss/psrvel (m22_road_msgs/PsrVel)
+#  输入: /m22/imu/data_raw + /ins/velocity (m22_road_msgs/InsVelocity)
 #  输出: /tf(odom->base_link) + /dr_odom + /dr_path + /total_mileage
 #
 #  消息包（m22_road_msgs）走标准 find_package：

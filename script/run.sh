@@ -157,7 +157,7 @@ cfg_get() {
 health_check() {
     local imu_t spd_t a
     imu_t="$(cfg_get imu_topic)";   imu_t="${imu_t:-/m22/imu/data_raw}"
-    spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/gnss/psrvel}"
+    spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/ins/velocity}"
     for a in "$@"; do                     # 命令行 -p imu_topic:=xxx 覆盖参数文件
         case "$a" in
             imu_topic:=*)   imu_t="${a#imu_topic:=}" ;;
@@ -191,7 +191,7 @@ cmd_start() {
         # 回放话题从参数文件取（imu_topic + speed_topic），兜底默认值
         local imu_t spd_t play_cmd
         imu_t="$(cfg_get imu_topic)";   imu_t="${imu_t:-/m22/imu/data_raw}"
-        spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/gnss/psrvel}"
+        spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/ins/velocity}"
         if [ -f "$PLAY_BAG" ]; then
             local pargs=("$BAG" --clock --topics "$imu_t" "$spd_t")
             [ -f "$QOS_YAML" ] && pargs+=(--qos-profile-overrides-path "$QOS_YAML")
@@ -297,7 +297,7 @@ cmd_check() {
     echo "---- 话题频率（每项采样约 3s）----"
     local imu_t spd_t
     imu_t="$(cfg_get imu_topic)";   imu_t="${imu_t:-/m22/imu/data_raw}"
-    spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/gnss/psrvel}"
+    spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/ins/velocity}"
     local topics; topics="$(ros2 topic list 2>/dev/null || true)"
     for t in "$imu_t" "$spd_t" /tf /dr_odom /total_mileage /dr_path; do
         if echo "$topics" | grep -qx "$t"; then

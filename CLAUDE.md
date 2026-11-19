@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 项目概览
 
 DrEngine：J6 车辆的纯 DR（Dead Reckoning，航位推算）节点。ROS 2 humble (C++17)。
-输入 `/m22/imu/data_raw`（姿态 AHRS + 积分节拍）+ `/gnss/psrvel`（车速），输出 `/tf`(odom→base_link)、`/dr_odom`、`/dr_path`、`/total_mileage`。
+输入 `/m22/imu/data_raw`（姿态 AHRS + 积分节拍）+ `/ins/velocity`（车速），输出 `/tf`(odom→base_link)、`/dr_odom`、`/dr_path`、`/total_mileage`。
 
 **独立 CMake 工程，不走 colcon**——用 `script/build.sh` 直编，产物 `build/dr_engine_node`。
 
@@ -45,9 +45,10 @@ BAG=/workspace/J6/j6/rosbag2_2026_11_06-20_48_30 ./script/run.sh start
 
 ## 车速源语义（重要）
 
-- `/gnss/psrvel` 是 `m22_road_msgs/msg/PsrVel`：GNSS ENU 速度矢量。车速取**水平幅值** `hypot(velocity.twist.linear.x, y)`，口径与 vehiche 仓库参考实现（`imu_speed_tf/sources.py`、`speed/compare_speed.py`）一致。
-- PsrVel **无挡位信息** ⇒ 无倒挡取负（旧 chassis_info 时代的 `gear_reverse_fix` 已移除）。已知局限：倒车段 DR 按前进积分。
-- `velocity.angular` 恒 0，必须忽略。
+- `/ins/velocity` 是 `m22_road_msgs/msg/InsVelocity`：INS 组合导航 ENU 速度矢量。车速取 `velocity_enu` 的**水平幅值** `hypot(x, y)`，口径与 vehiche 仓库参考实现（`imu_speed_tf/sources.py`、`speed/compare_speed.py`）一致。
+- `velocity_body` 是设备系（前左上）且未做安装外参转换，**不用**。
+- InsVelocity **无挡位信息** ⇒ 无倒挡取负（旧 chassis_info 时代的 `gear_reverse_fix` 已移除）。已知局限：倒车段 DR 按前进积分。
+- **数据陷阱**：bag `rosbag2_2026_11_06-20_48_30` 中 `/ins/velocity` 全为 0（speed_summary/tf_summary 证实），回放它只能验证接收管道（speed=0、里程不增）；轨迹验证需用含非零 ins 数据的 bag 或实车。
 
 ## 消息包依赖（m22_road_msgs）
 
@@ -63,7 +64,7 @@ J6（`ssh j6_2`，aarch64 / Debian12 / ROS humble，colcon isolated 布局）**�
 ```bash
 # 车端编译（源码在 /data/DrEngine）
 source /opt/ros/humble/setup.bash
-source /app/road/m22_road/setup.bash          # 提供 m22_road_msgs（PsrVel）
+source /app/road/m22_road/setup.bash          # 提供 m22_road_msgs（InsVelocity）
 source /data/toolchain/env.sh                  # 工具链 + 第三方 cmake 包
 cmake -S /data/DrEngine -B /data/DrEngine/build -DCMAKE_BUILD_TYPE=Release \
       -DIMUDR_DEPLOY_MSGDIR=/app/road/m22_road/install/m22_road_msgs
@@ -77,20 +78,20 @@ cmake --build /data/DrEngine/build -j6        # 产物 build/dr_engine_node (aar
 - J6 用**自定义 RMW** `rmw_communication`（hobot 共享内存中间件），但 m22 驱动跑的是 `rmw_fastrtps_cpp` ⇒ 运行节点与 `ros2` CLI 都要 `export RMW_IMPLEMENTATION=rmw_fastrtps_cpp`，否则 `ros2 topic list` 只见 `/parameter_events`。
 - 消息导出 target 的 INTERFACE 引用构建机 libpython 路径（`/opt/j6-sysroot/...`、`/sysroot/...libpython3.11.so`），已软链到车端 `libpython3.11.so.1`。
 - 源码改动需重新同步到车端：`scp <file> j6_2:/data/DrEngine/...`。
-- 验证口径同 x86 bag 回放：`订阅 .../gnss/psrvel (m22_road_msgs/PsrVel)`、`[车速] 首帧`、`车速过期=0`、里程递增。实车 psrvel 低速≈0.02m/s 属正常（怠速）。输出 `/dr_odom`50Hz `/dr_path`1Hz `/total_mileage`50Hz，`road_cleaning_recorder` 已在订阅。
+- 验证口径同 x86 bag 回放：`订阅 .../ins/velocity (m22_road_msgs/InsVelocity)`、`[车速] 首帧`、`车速过期=0`、里程递增（注意实车 ins/velocity 若低速恒 0，先确认 INS 模块是否输出）。输出 `/dr_odom`50Hz `/dr_path`1Hz `/total_mileage`50Hz，`road_cleaning_recorder` 已在订阅。
 
 ## 配置与脚本约定
 
 - `config/dr_params.yaml` 是唯一参数入口（节点名 `dr_engine_node`）；`run.sh` 也从它读 `imu_topic`/`speed_topic`（健康检查、bag 回放话题），改话题只需改这里。
-- QoS 默认 best_effort（`qos_reliable: false`）；psrvel 约 10Hz，`speed_timeout_s: 0.3` 够用。
+- QoS 默认 best_effort（`qos_reliable: false`）；ins/velocity 约 10Hz，`speed_timeout_s: 0.3` 够用。
 - `run.sh start` 起 bag 前固定 `sleep 12` 等 mcap 索引 ⇒ 节点会漏掉 bag 开头约 12s 数据（统计帧数时注意）。
 - 验证参考数据：`/workspace/J6/vehiche/output/speed/speed_summary.csv` 是同 bag 各速度源（psrvel/bestgnssvel/ins/chassis）的全量积分里程/速度范围，可作交叉基准。
 
 ## bag 回放验证要点
 
-用 `/workspace/J6/j6/rosbag2_2026_11_06-20_48_30`（351s，`/gnss/psrvel` 3505 帧 @10Hz，psrvel 全量积分 441.8m，chassis 435.0m）：
+用 `/workspace/J6/j6/rosbag2_2026_11_06-20_48_30`（351s，`/ins/velocity` 3504 帧 @10Hz 但**全为 0**；同 bag psrvel 全量积分 441.8m、chassis 435.0m 可作对照）：
 
-- 启动日志应出现 `订阅 /gnss/psrvel (m22_road_msgs/PsrVel)`，无"尚未收到"告警。
-- `[车速] 首帧` 打印 speed + solution_status；周期日志 `speed=` 随车变化、里程递增、`车速过期=0`。
-- 交叉验证：`ros2 topic echo /gnss/psrvel --once` 的 hypot(x,y) 与节点日志 speed 一致。
+- 启动日志应出现 `订阅 /ins/velocity (m22_road_msgs/InsVelocity)`，无"尚未收到"告警。
+- `[车速] 首帧` 打印 speed + ins/gnss_status + alarm；该 bag 预期 speed=0.0000、里程恒 0（数据全零，非代码问题）。
+- 有非零 ins 数据时：周期日志 `speed=` 随车变化、里程递增、`车速过期=0`；交叉验证 `ros2 topic echo /ins/velocity --once` 的 hypot(velocity_enu.x, y) 与节点日志 speed 一致。
 - bag 播完后应触发 `[中断]`（IMU+车速同时超时、位置归零）——这是预期行为，不是 bug。
