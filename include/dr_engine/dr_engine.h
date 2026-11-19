@@ -3,7 +3,7 @@
 //
 //  口径与 hg-slam `src/asyn_proc/dead_reckoning_proc.cpp` 一致：
 //    1) 姿态：FusionAhrs（Madgwick，6 轴，无磁力计）融合加速度计 + 陀螺仪；
-//    2) 速度：**大小来自底盘车速 (chassis_info.speed_mps)**，方向由姿态投影到世界系：
+//    2) 速度：**大小来自 GNSS ENU 水平速度幅值 (/gnss/psrvel, hypot(x,y))**，方向由姿态投影到世界系：
 //         v = speed * (cos(pitch)cos(yaw), cos(pitch)sin(yaw), sin(pitch))
 //    3) 位置：只对速度积分  pos += v * dt
 //    加速度**不参与位置积分** —— 这是该 DR 能长时间不漂的关键（纯惯性二重积分几十秒就会发散）。

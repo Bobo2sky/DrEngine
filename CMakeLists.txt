@@ -3,14 +3,13 @@ project(dr_engine CXX)
 
 # ============================================================================
 #  DrEngine —— 纯 DR 工程（x86 直编 / aarch64(J6) 交叉编译通用）
-#  输入: /imu/data + /chassis_info
+#  输入: /m22/imu/data_raw + /gnss/psrvel (m22_road_msgs/PsrVel)
 #  输出: /tf(odom->base_link) + /dr_odom + /dr_path + /total_mileage
 #
-#  参考 src/localization/hg-slam/CMakeLists.txt 的做法：
-#    · 先按 CMAKE_SYSTEM_PROCESSOR 判 ARM/x86；
-#    · 消息包（chassis_msgs）用 MSG_DIR 覆盖层定位 —— 不依赖 source setup.bash，
-#      交叉编译时用 -DMSG_DIR=<aarch64 覆盖层> 指到 ARM 版本；
-#    · 显式链接 typesupport 动态库并写入 RPATH ⇒ 产物在本机/目标机都能直接运行。
+#  消息包（m22_road_msgs）走标准 find_package：
+#    · 编译前 source 消息层 install（开发机: /workspace/J6/vehiche/install/setup.bash，
+#      build.sh 已自动加该候选；车端可由 CMAKE_PREFIX_PATH / AMENT_PREFIX_PATH 指到对应 install）；
+#    · 仍显式把 m22_road_msgs 的 lib 目录写进产物 RPATH ⇒ 不 source 也能直接运行。
 # ============================================================================
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -34,30 +33,10 @@ else()
     set(ARM OFF)
 endif()
 
-# ---- 消息包覆盖层（chassis_msgs）----
-#   默认值按架构区分（均可用 -DMSG_DIR=... 覆盖）：
-#     · ARM (车端 J6 原生编译)  : /data/runtime/ros_msg/install
-#     · x86 (开发机)            : 本仓库 app/common/install
-if(ARM)
-    set(MSG_DIR_DEFAULT "/data/runtime/ros_msg/install")
-else()
-    set(MSG_DIR_DEFAULT "${PROJECT_SOURCE_DIR}/../../../app/common/install")
-endif()
-set(MSG_DIR "${MSG_DIR_DEFAULT}" CACHE PATH "消息包覆盖层根目录（含 chassis_msgs/<include,lib>）")
-get_filename_component(MSG_DIR "${MSG_DIR}" ABSOLUTE)
-message(STATUS "DrEngine: MSG_DIR = ${MSG_DIR}  (ARM=${ARM}, 默认值 ${MSG_DIR_DEFAULT})")
-
-if(NOT EXISTS "${MSG_DIR}/chassis_msgs")
-    if(ARM)
-        set(_alt "${PROJECT_SOURCE_DIR}/../../../app/common/install")
-    else()
-        set(_alt "/data/runtime/ros_msg/install")
-    endif()
-    message(FATAL_ERROR "在 MSG_DIR 下找不到 chassis_msgs：${MSG_DIR}/chassis_msgs\n"
-                        "  当前架构默认值 : ${MSG_DIR_DEFAULT}\n"
-                        "  另一套可能路径 : ${_alt}\n"
-                        "  提示: 用 -DMSG_DIR=<路径> 指定，例如车端原生编译 -DMSG_DIR=/data/runtime/ros_msg/install")
-endif()
+# ---- 消息包（m22_road_msgs）----
+#   前提：cmake 前 source 过消息层 install（含 m22_road_msgs），
+#   开发机即: source /workspace/J6/vehiche/install/setup.bash（build.sh 自动做）
+find_package(m22_road_msgs REQUIRED)
 
 # ---- ROS 2 依赖 ----
 find_package(rclcpp REQUIRED)
@@ -67,22 +46,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2_msgs REQUIRED)
 find_package(rcutils REQUIRED)
 find_package(Eigen3 REQUIRED)
-
-# ---- 消息包链接：直接走 MSG_DIR 覆盖层（与 hg-slam 同款，不依赖 source）----
-include_directories(${MSG_DIR}/chassis_msgs/include/chassis_msgs)
-link_directories(${MSG_DIR}/chassis_msgs/lib)
-
-set(CHASSIS_LIBS "")
-foreach(part generator_c typesupport_c typesupport_cpp typesupport_fastrtps_cpp typesupport_introspection_cpp)
-    set(_so "${MSG_DIR}/chassis_msgs/lib/libchassis_msgs__rosidl_${part}.so")
-    if(EXISTS "${_so}")
-        list(APPEND CHASSIS_LIBS "${_so}")
-    elseif(part STREQUAL "typesupport_cpp")
-        message(FATAL_ERROR "缺少 ${_so}\n"
-                            "  提示: MSG_DIR 指向的覆盖层架构不对（x86 顶层 / aarch64）时请换 -DMSG_DIR=...")
-    endif()
-endforeach()
-message(STATUS "DrEngine: chassis_msgs 库 = ${CHASSIS_LIBS}")
 
 add_executable(dr_engine_node
     src/dr_node.cpp
@@ -99,30 +62,37 @@ target_include_directories(dr_engine_node PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/dr_engine/madgwick   # 让 FusionXxx.cpp 里的 "FusionXxx.h" 直接可解析
 )
 
+# 消息包只链 C++ typesupport target。直接用 ${<pkg>_TARGETS} 会把 generator_py
+# 也拉进来（其 INTERFACE 写死了构建机的 libpython 绝对路径，车端无此文件 ⇒ 链接失败）。
+# 因此逐个挑选 <pkg>::<pkg>__rosidl_typesupport_cpp。
+set(_msg_cpp_targets)
+foreach(_pkg sensor_msgs nav_msgs geometry_msgs tf2_msgs m22_road_msgs)
+    if(TARGET ${_pkg}::${_pkg}__rosidl_typesupport_cpp)
+        list(APPEND _msg_cpp_targets ${_pkg}::${_pkg}__rosidl_typesupport_cpp)
+    else()
+        message(FATAL_ERROR "${_pkg} 缺少 __rosidl_typesupport_cpp target")
+    endif()
+endforeach()
+
 target_link_libraries(dr_engine_node
     rclcpp::rclcpp
-    ${sensor_msgs_TARGETS}
-    ${nav_msgs_TARGETS}
-    ${geometry_msgs_TARGETS}
-    ${tf2_msgs_TARGETS}
-    ${CHASSIS_LIBS}
+    ${_msg_cpp_targets}
     ${rcutils_TARGETS}
     Eigen3::Eigen
 )
 
-# ---- RPATH：把消息覆盖层 / ROS 库目录写进产物 ----
-#   这样 `./build/dr_engine_node` 即使不 source 覆盖层，也不会再报
-#   "libchassis_msgs__rosidl_generator_c.so: cannot open shared object file"。
-# BUILD_RPATH 用编译时的 MSG_DIR；部署到目标机（如 J6: /opt/work/app/common/install）时
-# 用 -DIMUDR_DEPLOY_MSGDIR=... 让产物里的 RPATH 指向目标机真实路径。
-if(ARM)
-    set(_deploy_default "/data/runtime/ros_msg/install")
-else()
-    set(_deploy_default "${MSG_DIR}")
-endif()
-set(IMUDR_DEPLOY_MSGDIR "${_deploy_default}"
-    CACHE PATH "目标机上的消息覆盖层根目录（写入产物 RPATH）")
-set(IMUDR_RPATH "${IMUDR_DEPLOY_MSGDIR}/chassis_msgs/lib")
+# ---- RPATH：把消息层(m22_road_msgs) / ROS 库目录写进产物 ----
+#   这样 `./build/dr_engine_node` 即使不 source 消息层 install，也不会再报
+#   "libm22_road_msgs__rosidl_typesupport_cpp.so: cannot open shared object file"。
+#   m22_road_msgs_DIR = <包前缀>/share/m22_road_msgs/cmake（isolated/merged 布局均适用，
+#   回推三级即包前缀，其下 lib/ 就是消息库）。部署到目标机（如 J6）时用
+#   -DIMUDR_DEPLOY_MSGDIR=<目标机 m22_road_msgs 包目录> 让 RPATH 指向真实路径。
+get_filename_component(_m22_pkg_dir  "${m22_road_msgs_DIR}" DIRECTORY)   # <prefix>/share/m22_road_msgs
+get_filename_component(_m22_share    "${_m22_pkg_dir}" DIRECTORY)        # <prefix>/share
+get_filename_component(_m22_prefix   "${_m22_share}" DIRECTORY)          # <prefix>（其下 lib/ 为消息库）
+set(IMUDR_DEPLOY_MSGDIR "${_m22_prefix}"
+    CACHE PATH "目标机上的 m22_road_msgs 包目录（其下含 lib/，写入产物 RPATH）")
+set(IMUDR_RPATH "${IMUDR_DEPLOY_MSGDIR}/lib")
 foreach(_rl "/opt/ros/$ENV{ROS_DISTRO}/lib" "/opt/ros/humble/lib" "/opt/ros/jazzy/lib")
     if(EXISTS "${_rl}")
         list(APPEND IMUDR_RPATH "${_rl}")

@@ -1,6 +1,6 @@
 # ============================================================================
 #  DrEngine 参数（ros2 param 文件格式，用 --params-file 加载）
-#  算法口径见 include/dr_engine/dr_engine.h：姿态=AHRS，速度大小=底盘车速，位置=∫v·dt
+#  算法口径见 include/dr_engine/dr_engine.h：姿态=AHRS，速度大小=GNSS ENU水平速度幅值，位置=∫v·dt
 # ============================================================================
 dr_engine_node:
   ros__parameters:
@@ -11,7 +11,7 @@ dr_engine_node:
 
     # ---- 话题与坐标系 ----
     imu_topic: "/m22/imu/data_raw"
-    speed_topic: "/chassis_info"
+    speed_topic: "/gnss/psrvel"   # m22_road_msgs/PsrVel：GNSS伪距速度(ENU)，车速取水平幅值 hypot(x,y)
     odom_topic: "/dr_odom"
     path_topic: "/dr_path"
     parent_frame: "odom"          # DR 原点系（不发布 /tf_static ⇒ rviz Fixed Frame 用它）
@@ -41,10 +41,10 @@ dr_engine_node:
     use_ahrs_offset: true         # 陀螺零偏在线跟随
 
     # ---- 车速 ----
-    speed_scale: 1.0              # 车速标度修正（车轮半径误差等）
-    gear_reverse_fix: true        # ★chassis speed_mps 是【幅值】：倒挡取负（口径同 hg-slam）
-    reverse_gear_value: 3         # 倒挡编码（common_msgs/msg/Enum: GEAR_N=1, GEAR_D=2, GEAR_R=3, GEAR_P=4）
-    speed_timeout_s: 0.3          # 超时门限
+    speed_scale: 1.0              # 车速标度修正
+                                  # ★速度源 /gnss/psrvel 是 GNSS ENU 速度矢量，车速取水平幅值 hypot(x,y)（恒 ≥0）
+                                  #   无挡位信息 ⇒ 原 gear_reverse_fix 倒挡取负逻辑已移除（倒车段 DR 按前进积分，已知局限）
+    speed_timeout_s: 0.3          # 超时门限（psrvel 约 10Hz，间隔 0.1s）
     hold_last_speed: true         # true=保持上次速度；false=置零
     use_abs_speed: false          # true=只用 |speed|（倒车也当作前进）
 

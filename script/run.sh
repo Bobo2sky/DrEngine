@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-#  DrEngine 运行脚本（后台常驻）—— 自动准备环境（ROS 2 + chassis_msgs 覆盖层）后
+#  DrEngine 运行脚本（后台常驻）—— 自动准备环境（ROS 2 + 消息层 m22_road_msgs）后
 #  把 dr_engine_node 放到后台运行，脚本立即返回。
 #
 #  用法:
@@ -17,7 +17,7 @@
 #
 #  环境变量（都在 start 时生效）:
 #    PARAMS=other.yaml   参数文件（默认 config/dr_params.yaml）
-#    BAG=/path/x.mcap    顺便起回放（--clock，只放 /imu/data /chassis_info），再起节点
+#    BAG=/path/bag目录   顺便起回放（--clock，只放参数文件里的 imu_topic/speed_topic），再起节点
 #    RVIZ=1              顺便起 rviz2（Fixed Frame=odom）
 #
 #  运行时文件: run/{node,player,rviz}.pid  run/node.out(节点 stdout/stderr)
@@ -32,12 +32,14 @@ PARAMS="${PARAMS:-$DIR/config/dr_params.yaml}"
 ROS_SETUP="${ROS_SETUP:-}"                                     # 可用环境变量覆盖
 PLAY_BAG="$ROOT/app/localization/play_bag.sh"
 QOS_YAML="$ROOT/app/localization/qos_replay.yaml"
-# 消息包覆盖层候选（按序尝试；都没有则依赖二进制里写死的 RPATH，不报错）：
+# 消息层候选（按序尝试；都没有则依赖二进制里写死的 RPATH，不报错）：
+#   · 开发机 vehiche install（含 m22_road_msgs）: /workspace/J6/vehiche/install
 #   · 开发机仓库布局 : <仓库>/app/common/install
-#   · 车端(J6)运行时 : /data/runtime/ros_msg/install  （与 CMake 的 ARM 默认 MSG_DIR 一致）
+#   · 车端(J6)运行时 : /data/runtime/ros_msg/install
 #   · 也可用 COMMON_SETUP=/path/setup.bash 显式指定
 COMMON_CANDIDATES=(
     "${COMMON_SETUP:-}"
+    "/workspace/J6/vehiche/install/setup.bash"
     "$ROOT/app/common/install/setup.bash"
     "/data/runtime/ros_msg/install/local_setup.bash"
     "/data/runtime/ros_msg/install/setup.bash"
@@ -87,7 +89,7 @@ prepare_env() {
         warn "未找到 ROS setup.bash（/opt/ros/*），若 ldd 缺库请检查 ROS 安装"
     fi
 
-    # --- 消息覆盖层（chassis_msgs）：多个候选，缺了也不致命（走 RPATH）---
+    # --- 消息层（m22_road_msgs）：多个候选，缺了也不致命（走 RPATH）---
     OVERLAY=""
     for cand in "${COMMON_CANDIDATES[@]}"; do
         [ -n "$cand" ] && [ -f "$cand" ] && { OVERLAY="$cand"; break; }
@@ -95,7 +97,7 @@ prepare_env() {
     if [ -n "$OVERLAY" ]; then
         source "$OVERLAY"; info "消息层 : $OVERLAY"
     else
-        warn "未找到消息覆盖层 setup.bash（试过: ${COMMON_CANDIDATES[*]}）"
+        warn "未找到消息层 setup.bash（试过: ${COMMON_CANDIDATES[*]}）"
         warn "  ⇒ 依赖二进制里写死的 RPATH（编译期 -DIMUDR_DEPLOY_MSGDIR）；若下面 ldd 报缺库请补路径"
     fi
     set -u
@@ -103,8 +105,8 @@ prepare_env() {
     missing="$(ldd "$NODE" 2>/dev/null | awk '/not found/{print $1}' | sort -u | tr '\n' ' ')"
     if [ -n "${missing// /}" ]; then
         err "节点缺共享库: $missing"
-        err "  提示: 找 chassis_msgs: ls /data/runtime/ros_msg/install/chassis_msgs/lib 2>/dev/null"
-        err "        或 source 消息覆盖层后重试: COMMON_SETUP=/data/runtime/ros_msg/install/setup.bash $0 start"
+        err "  提示: 找 m22_road_msgs: ls /workspace/J6/vehiche/install/m22_road_msgs/lib 2>/dev/null"
+        err "        或 source 消息层后重试: COMMON_SETUP=/workspace/J6/vehiche/install/setup.bash $0 start"
         exit 1
     fi
     mkdir -p "$RUN_DIR" "$DIR/log"
@@ -154,8 +156,8 @@ cfg_get() {
 # 启动后健康检查：配置的话题是否真的有发布者
 health_check() {
     local imu_t spd_t a
-    imu_t="$(cfg_get imu_topic)";   imu_t="${imu_t:-/imu/data}"
-    spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/chassis_info}"
+    imu_t="$(cfg_get imu_topic)";   imu_t="${imu_t:-/m22/imu/data_raw}"
+    spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/gnss/psrvel}"
     for a in "$@"; do                     # 命令行 -p imu_topic:=xxx 覆盖参数文件
         case "$a" in
             imu_topic:=*)   imu_t="${a#imu_topic:=}" ;;
@@ -185,12 +187,22 @@ cmd_start() {
 
     # 1) 可选：回放（必须先起，节点晚到才拿得到数据）
     if [ -n "${BAG:-}" ]; then
-        [ -f "$BAG" ] || { err "bag 不存在: $BAG"; exit 1; }
-        [ -f "$PLAY_BAG" ] || { err "找不到回放脚本 $PLAY_BAG（非仓库布局时请自行起 bag，不要用 BAG=…）"; exit 1; }
-        local pargs=("$BAG" --clock --topics /imu/data /chassis_info)
-        [ -f "$QOS_YAML" ] && pargs+=(--qos-profile-overrides-path "$QOS_YAML")
-        local ppid; ppid="$(spawn "$PLAYER_PID" "$RUN_DIR/player.out" "bash '$PLAY_BAG' ${pargs[*]}")"
-        echo "  回放    : PID $ppid  ($BAG)"
+        [ -e "$BAG" ] || { err "bag 不存在: $BAG"; exit 1; }
+        # 回放话题从参数文件取（imu_topic + speed_topic），兜底默认值
+        local imu_t spd_t play_cmd
+        imu_t="$(cfg_get imu_topic)";   imu_t="${imu_t:-/m22/imu/data_raw}"
+        spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/gnss/psrvel}"
+        if [ -f "$PLAY_BAG" ]; then
+            local pargs=("$BAG" --clock --topics "$imu_t" "$spd_t")
+            [ -f "$QOS_YAML" ] && pargs+=(--qos-profile-overrides-path "$QOS_YAML")
+            play_cmd="bash '$PLAY_BAG' ${pargs[*]}"
+        else
+            # 仓库回放脚本不在（非仓库布局）⇒ 直接用 ros2 bag play 兜底
+            warn "未找到回放脚本 $PLAY_BAG，改用 ros2 bag play 直接回放"
+            play_cmd="ros2 bag play '$BAG' --clock --topics '$imu_t' '$spd_t'"
+        fi
+        local ppid; ppid="$(spawn "$PLAYER_PID" "$RUN_DIR/player.out" "$play_cmd")"
+        echo "  回放    : PID $ppid  ($BAG, 话题: $imu_t $spd_t)"
         sleep 12      # 等 mcap 索引加载 + 起播
     fi
 
@@ -284,8 +296,8 @@ cmd_check() {
     echo
     echo "---- 话题频率（每项采样约 3s）----"
     local imu_t spd_t
-    imu_t="$(cfg_get imu_topic)";   imu_t="${imu_t:-/imu/data}"
-    spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/chassis_info}"
+    imu_t="$(cfg_get imu_topic)";   imu_t="${imu_t:-/m22/imu/data_raw}"
+    spd_t="$(cfg_get speed_topic)"; spd_t="${spd_t:-/gnss/psrvel}"
     local topics; topics="$(ros2 topic list 2>/dev/null || true)"
     for t in "$imu_t" "$spd_t" /tf /dr_odom /total_mileage /dr_path; do
         if echo "$topics" | grep -qx "$t"; then

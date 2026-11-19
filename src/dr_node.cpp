@@ -1,16 +1,17 @@
 // ============================================================================
 //  dr_node.cpp —— 纯 DR 的 ROS 2 节点
 //
-//  订阅: /imu/data       (sensor_msgs/Imu)          → 姿态(AHRS) + 积分节拍
-//        /chassis_info   (chassis_msgs/ChassisInfo) → speed_mps
+//  订阅: /imu/data       (sensor_msgs/Imu)             → 姿态(AHRS) + 积分节拍
+//        /gnss/psrvel    (m22_road_msgs/PsrVel)        → ENU水平速度幅值 hypot(x,y)
 //  发布: /tf              (tf2_msgs/TFMessage)       → odom -> base_link  ← 唯一 TF 输出
 //        /dr_odom        (nav_msgs/Odometry)        → 位姿 + 速度（rviz 箭头/给其他节点用）
 //        /dr_path        (nav_msgs/Path)            → DR 轨迹（rviz 画轨迹必须靠它）
 //
 //  注意：
 //   * 不发布 /tf_static（按需求）；因此 rviz 的 Fixed Frame 用 odom。
-//   * /chassis_info 的 header.stamp 在实车包里恒为 0（无时间戳）⇒ 车速时间基准取"收到那一刻的 IMU 时间"，
+//   * 车速时间基准取"收到那一刻的 IMU 时间"（引擎内对齐），
 //     这样仿真钟(use_sim_time)与墙钟混用也不会算错年龄。
+//   * PsrVel 无挡位信息 ⇒ 不做倒挡取负；GNSS 速度为水平幅值（恒 ≥0），倒车段按前进积分（已知局限）。
 // ============================================================================
 #include <chrono>
 #include <cmath>
@@ -26,7 +27,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
-#include <chassis_msgs/msg/chassis_info.hpp>
+#include <m22_road_msgs/msg/psr_vel.hpp>
 
 #include "dr_engine/dr_engine.h"
 #include "dr_engine/log_sink.h"
@@ -63,9 +64,9 @@ public:
         m_subImu = create_subscription<sensor_msgs::msg::Imu>(
             m_imuTopic, imu_qos,
             [this](const sensor_msgs::msg::Imu::ConstSharedPtr &msg) { onImu(msg); });
-        m_subSpeed = create_subscription<chassis_msgs::msg::ChassisInfo>(
+        m_subSpeed = create_subscription<m22_road_msgs::msg::PsrVel>(
             m_speedTopic, spd_qos,
-            [this](const chassis_msgs::msg::ChassisInfo::ConstSharedPtr &msg) { onSpeed(msg); });
+            [this](const m22_road_msgs::msg::PsrVel::ConstSharedPtr &msg) { onSpeed(msg); });
 
         // ---- 发布 ----
         m_pubTf    = create_publisher<tf2_msgs::msg::TFMessage>("/tf", rclcpp::QoS(100));
@@ -84,7 +85,7 @@ public:
         RCLCPP_INFO(get_logger(), "[启动] DrEngine 节点已就绪");
         RCLCPP_INFO(get_logger(), "[启动] 订阅 %s (%s) / %s (%s)  QoS=%s depth=%d",
                     m_imuTopic.c_str(), "sensor_msgs/Imu",
-                    m_speedTopic.c_str(), "chassis_msgs/ChassisInfo",
+                    m_speedTopic.c_str(), "m22_road_msgs/PsrVel",
                     m_qosReliable ? "reliable" : "best_effort", m_qosDepth);
         RCLCPP_INFO(get_logger(), "[启动] 发布 /tf (%s -> %s) + %s @%.1fHz  + %s @%.1fHz  + %s(总里程, PointStamped.%s)",
                     m_parentFrame.c_str(), m_childFrame.c_str(),
@@ -92,10 +93,8 @@ public:
                     m_pathTopic.c_str(), m_pathPublishHz,
                     m_mileageTopic.c_str(), m_mileageField.c_str());
         RCLCPP_INFO(get_logger(), "[启动] 位置解算模式: z_mode=%s", m_zModeName.c_str());
-        RCLCPP_INFO(get_logger(), "[启动] 车速符号: gear_reverse_fix=%s (reverse_gear_value=%d ⇒ 该挡速度取负; "
-                    "GEAR: N=1 D=2 R=3 P=4)", m_gearReverseFix ? "on" : "off", m_reverseGearValue);
         RCLCPP_INFO(get_logger(), "[启动] 算法口径: 姿态=FusionAhrs(6轴,gain=%.2f,accReject=%.1fdeg) "
-                    "速度=chassis speed(scale=%.3f,timeout=%.2fs,hold_last=%d) 位置=∫v·dt",
+                    "速度=GNSS ENU水平幅值(scale=%.3f,timeout=%.2fs,hold_last=%d,无倒挡取负) 位置=∫v·dt",
                     m_params.ahrs_gain, m_params.ahrs_acc_reject_deg,
                     m_params.speed_scale, m_params.speed_timeout_s, static_cast<int>(m_params.hold_last_speed));
         RCLCPP_INFO(get_logger(), "[启动] 静止初始化: %.1fs / 最少 %d 帧; g_auto=%d (配置 g=%.5f); yaw0=%.2fdeg; "
@@ -130,7 +129,7 @@ private:
     void loadParams()
     {
         m_imuTopic   = declare_parameter<std::string>("imu_topic", "/imu/data");
-        m_speedTopic = declare_parameter<std::string>("speed_topic", "/chassis_info");
+        m_speedTopic = declare_parameter<std::string>("speed_topic", "/gnss/psrvel");
         m_odomTopic  = declare_parameter<std::string>("odom_topic", "/dr_odom");
         m_pathTopic  = declare_parameter<std::string>("path_topic", "/dr_path");
         m_parentFrame = declare_parameter<std::string>("parent_frame", "odom");
@@ -176,11 +175,8 @@ private:
         // 日志文件（空 = 默认 <工程根>/log/dr.text）
         m_logFile = declare_parameter<std::string>("log_file", "");
 
-        // ★车速正负：chassis_info.speed_mps 是【幅值】(实测恒 ≥0)，倒挡要取负
-        //   口径同 hg-slam external_data_node.cpp: if (gear == GEAR_R) speed = -speed;
-        //   GEAR 编码（common_msgs/msg/Enum）: N=1, D=2, R=3, P=4
-        m_gearReverseFix   = declare_parameter<bool>("gear_reverse_fix", true);
-        m_reverseGearValue = declare_parameter<int>("reverse_gear_value", 3);
+        // 注：原 gear_reverse_fix / reverse_gear_value 已随 /chassis_info → /gnss/psrvel 切换移除：
+        //   PsrVel 是 GNSS ENU 速度矢量，无挡位信息，车速取水平幅值（恒 ≥0）。
 
         // IMU + 车速【同时】超时 ⇒ 停止递推、TF 位置归零
         m_imuTimeoutS = declare_parameter<double>("imu_timeout_s", 0.3);
@@ -244,33 +240,26 @@ private:
     }
 
     // ---------------- 车速 ----------------
-    void onSpeed(const chassis_msgs::msg::ChassisInfo::ConstSharedPtr &msg)
+    void onSpeed(const m22_road_msgs::msg::PsrVel::ConstSharedPtr &msg)
     {
         m_lastSpeedRecvS = wall_s();
 
-        // ★车速正负值归一（借鉴 hg-slam external_data_node.cpp procChassisInfoArrive）：
-        //   speed_mps 是幅值（实测恒 ≥0，倒车时 gear==R 而 speed 仍为正），
-        //   ⇒ 倒挡取负，否则纯 DR 会朝前推、位姿与里程全错。
-        double v = static_cast<double>(msg->speed_mps);
-        m_isReverse = false;
-        if (m_gearReverseFix && static_cast<int>(msg->gear) == m_reverseGearValue)
-        {
-            v = -v;
-            m_isReverse = (std::fabs(v) > 1e-3);
-            if (!m_reverseLogged && std::fabs(v) > 1e-3)
-            {
-                m_reverseLogged = true;
-                RCLCPP_INFO(get_logger(), "[车速] 检测到倒挡 gear=%u ⇒ 速度取负 %.3f m/s（DR 后退）",
-                            static_cast<unsigned>(msg->gear), v);
-            }
-        }
+        // ★车速取 ENU 水平速度幅值（口径同 vehiche imu_speed_tf/sources.py / compare_speed.py 的 psrvel 分支）：
+        //   PsrVel.velocity.twist.linear = 当地 ENU 速度(m/s)，angular 恒 0（订阅端必须忽略）；
+        //   无挡位信息 ⇒ 不做倒挡取负（gear_reverse_fix 已移除，倒车段按前进积分，已知局限）。
+        const auto &lin = msg->velocity.twist.linear;
+        const double v  = std::hypot(static_cast<double>(lin.x), static_cast<double>(lin.y));
         m_engine.updateSpeed(v);
         if (!m_speedFrameLogged)
         {
             m_speedFrameLogged = true;
-            const bool stampZero = (msg->header.stamp.sec == 0 && msg->header.stamp.nanosec == 0);
-            RCLCPP_INFO(get_logger(), "[车速] 首帧 speed_mps=%.4f  header.stamp=%s",
-                        msg->speed_mps, stampZero ? "0(无时间戳,已改用 IMU 时间对齐)" : "有效");
+            const bool stampZero = (msg->velocity.header.stamp.sec == 0 &&
+                                    msg->velocity.header.stamp.nanosec == 0);
+            RCLCPP_INFO(get_logger(), "[车速] 首帧 speed=%.4f m/s (ENU=(%.4f, %.4f, %.4f))  "
+                        "solution_status=%u velocity_type=%u  header.stamp=%s",
+                        v, lin.x, lin.y, lin.z,
+                        msg->solution_status, msg->velocity_type,
+                        stampZero ? "0(无时间戳,已改用 IMU 时间对齐)" : "有效");
         }
     }
 
@@ -442,12 +431,11 @@ private:
         RCLCPP_INFO(get_logger(),
                     "[日志] pos=(%8.3f,%8.3f,%8.3f)m v=(%6.3f,%6.3f,%6.3f)m/s speed=%.3fm/s "
                     "rpy=(%7.2f,%6.2f,%7.2f)deg 里程=%.2fm | IMU %ld 帧 %.1fHz dt_max=%.1fms "
-                    "断流=%ld 回跳=%ld 车速过期=%ld 车速年龄=%.3fs 倒挡=%d%s",
+                    "断流=%ld 回跳=%ld 车速过期=%ld 车速年龄=%.3fs%s",
                     p.pos.x(), p.pos.y(), p.pos.z(), p.vel.x(), p.vel.y(), p.vel.z(), p.speed,
                     p.rpy.x() * 180.0 / M_PI, p.rpy.y() * 180.0 / M_PI, p.rpy.z() * 180.0 / M_PI,
                     m_engine.traveledDistance(), s.imu_cnt, dt_rate, s.dt_max * 1e3,
                     s.imu_gap_cnt, s.imu_nonmono_cnt, s.speed_stale_cnt, s.speed_age,
-                    static_cast<int>(m_isReverse),
                     m_paused ? "  [已中断:IMU+车速同时超时,位置归零]" : "");
         m_engine.resetRateStats();
 
@@ -482,10 +470,6 @@ private:
     double m_imuTimeoutS = 0.3;        // IMU 超时门限
     bool   m_pauseOnBothTimeout = true;// IMU+车速同时超时 ⇒ 停止递推、位置归零
     double m_lastImuRecvS = -1.0;      // 最近一次 IMU 到达（节点时钟 s）
-    bool   m_gearReverseFix = true;    // 倒挡取负（speed_mps 是幅值）
-    int    m_reverseGearValue = 3;     // GEAR_R=3 (common_msgs Enum: N=1 D=2 R=3 P=4)
-    bool   m_isReverse = false;        // 当前是否倒挡（日志用）
-    bool   m_reverseLogged = false;    // 首次检测到倒挡打印一次
     double m_lastSpeedRecvS = -1.0;    // 最近一次车速到达
     bool   m_paused = false;           // 当前是否处于"数据全丢"中断态
     double m_publishRateHz = 50.0, m_pathPublishHz = 1.0, m_pathAppendHz = 10.0, m_logPeriodS = 1.0;
@@ -504,7 +488,7 @@ private:
 
     // ---- ROS 实体 ----
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr m_subImu;
-    rclcpp::Subscription<chassis_msgs::msg::ChassisInfo>::SharedPtr m_subSpeed;
+    rclcpp::Subscription<m22_road_msgs::msg::PsrVel>::SharedPtr m_subSpeed;
     rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr m_pubTf;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr m_pubOdom;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr m_pubPath;

@@ -3,7 +3,7 @@
 <package format="3">
   <name>dr_engine</name>
   <version>0.1.0</version>
-  <description>纯 DR（Dead Reckoning）：/imu/data + /chassis_info -> /tf(odom->base_link)，口径同 hg-slam dead_reckoning_proc</description>
+  <description>纯 DR（Dead Reckoning）：/m22/imu/data_raw + /gnss/psrvel -> /tf(odom->base_link)，口径同 hg-slam dead_reckoning_proc</description>
   <maintainer email="wb@localhost">wb</maintainer>
   <license>Proprietary</license>
 
@@ -14,7 +14,7 @@
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>tf2_msgs</depend>
-  <depend>chassis_msgs</depend>
+  <depend>m22_road_msgs</depend>
   <depend>eigen</depend>
 
   <export>
